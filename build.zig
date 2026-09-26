@@ -3535,6 +3535,7 @@ fn categorizeSources(ally: std.mem.Allocator, target: std.Target, tls: Tls) Cate
         const sub_path = path[lib.prefix.len..];
 
         // Skip files from wrong targets.
+        if (target.os.tag != .macos and std.mem.indexOf(u8, sub_path, "videotoolbox") != null) continue;
         if (std.mem.startsWith(u8, sub_path, "tls_")) {
             if (!std.mem.startsWith(u8, sub_path["tls_".len..], @tagName(tls))) continue;
         } else if (std.mem.startsWith(u8, sub_path, "aarch64/")) {
