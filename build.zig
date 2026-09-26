@@ -3712,7 +3712,7 @@ const headers = [_][]const u8{
     // "libavutil/hwcontext_qsv.h",
     // "libavutil/hwcontext_vaapi.h",
     // "libavutil/hwcontext_vdpau.h",
-    // "libavutil/hwcontext_videotoolbox.h",
+    "libavutil/hwcontext_videotoolbox.h",
     // "libavutil/hwcontext_vulkan.h",
     "libavutil/iamf.h",
     "libavutil/imgutils.h",
