@@ -3270,6 +3270,10 @@ pub fn build(b: *std.Build) void {
     }, config_components_values);
     lib.root_module.addConfigHeader(config_components_h);
 
+    const component_lists_wf = b.addWriteFiles();
+    writeComponentLists(b, component_lists_wf, config_components_values);
+    lib.root_module.addIncludePath(component_lists_wf.getDirectory());
+
     const config_components_asm = b.addConfigHeader(.{
         .style = .nasm,
         .include_path = "config_components.asm",
@@ -3606,6 +3610,141 @@ fn categorizeSources(ally: std.mem.Allocator, target: std.Target, tls: Tls) Cate
         @field(result, field_name) = libs[i].list.items;
     }
     return result;
+}
+
+/// A component registry list that upstream `configure` generates, such as `libavcodec/codec_list.c`.
+const ComponentList = struct {
+    path: []const u8,
+    struct_name: []const u8,
+    array_name: []const u8,
+    registry: []const u8,
+    kinds: []const Kind,
+    trailer: []const []const u8 = &.{},
+
+    const Kind = struct {
+        symbol: ?[]const u8,
+        config: []const u8,
+    };
+};
+
+const component_lists = [_]ComponentList{
+    .{
+        .path = "libavcodec/codec_list.c",
+        .struct_name = "FFCodec",
+        .array_name = "codec_list",
+        .registry = @embedFile("libavcodec/allcodecs.c"),
+        .kinds = &.{
+            .{ .symbol = "encoder", .config = "ENCODER" },
+            .{ .symbol = "decoder", .config = "DECODER" },
+        },
+    },
+    .{
+        .path = "libavcodec/parser_list.c",
+        .struct_name = "FFCodecParser",
+        .array_name = "parser_list",
+        .registry = @embedFile("libavcodec/parsers.c"),
+        .kinds = &.{.{ .symbol = "parser", .config = "PARSER" }},
+    },
+    .{
+        .path = "libavcodec/bsf_list.c",
+        .struct_name = "FFBitStreamFilter",
+        .array_name = "bitstream_filters",
+        .registry = @embedFile("libavcodec/bitstream_filters.c"),
+        .kinds = &.{.{ .symbol = "bsf", .config = "BSF" }},
+    },
+    .{
+        .path = "libavformat/demuxer_list.c",
+        .struct_name = "FFInputFormat",
+        .array_name = "demuxer_list",
+        .registry = @embedFile("libavformat/allformats.c"),
+        .kinds = &.{.{ .symbol = "demuxer", .config = "DEMUXER" }},
+    },
+    .{
+        .path = "libavformat/muxer_list.c",
+        .struct_name = "FFOutputFormat",
+        .array_name = "muxer_list",
+        .registry = @embedFile("libavformat/allformats.c"),
+        .kinds = &.{.{ .symbol = "muxer", .config = "MUXER" }},
+    },
+    .{
+        .path = "libavformat/protocol_list.c",
+        .struct_name = "URLProtocol",
+        .array_name = "url_protocols",
+        .registry = @embedFile("libavformat/protocols.c"),
+        .kinds = &.{.{ .symbol = "protocol", .config = "PROTOCOL" }},
+    },
+    .{
+        .path = "libavfilter/filter_list.c",
+        .struct_name = "FFFilter",
+        .array_name = "filter_list",
+        .registry = @embedFile("libavfilter/allfilters.c"),
+        .kinds = &.{.{ .symbol = null, .config = "FILTER" }},
+        .trailer = &.{ "asrc_abuffer", "vsrc_buffer", "asink_abuffer", "vsink_buffer" },
+    },
+    .{
+        .path = "libavdevice/indev_list.c",
+        .struct_name = "FFInputFormat",
+        .array_name = "indev_list",
+        .registry = @embedFile("libavdevice/alldevices.c"),
+        .kinds = &.{.{ .symbol = "demuxer", .config = "INDEV" }},
+    },
+    .{
+        .path = "libavdevice/outdev_list.c",
+        .struct_name = "FFOutputFormat",
+        .array_name = "outdev_list",
+        .registry = @embedFile("libavdevice/alldevices.c"),
+        .kinds = &.{.{ .symbol = "muxer", .config = "OUTDEV" }},
+    },
+};
+
+/// Writes files into the `wf` dir depending on the provided `config_values`.
+/// This recreates `find_things_extern` and `print_enabled_components` from the upstream configure script.
+fn writeComponentLists(b: *std.Build, wf: *std.Build.Step.WriteFile, config_values: anytype) void {
+    var enabled: std.StringHashMapUnmanaged(bool) = .empty;
+    defer enabled.deinit(b.allocator);
+    inline for (@typeInfo(@TypeOf(config_values)).@"struct".field_names) |field_name| {
+        const value = @field(config_values, field_name);
+        if (@TypeOf(value) == bool) enabled.put(b.allocator, field_name, value) catch @panic("OOM");
+    }
+
+    for (component_lists) |list| {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(b.allocator);
+        out.print(b.allocator, "static const {s} * const {s}[] = {{\n", .{ list.struct_name, list.array_name }) catch @panic("OOM");
+        for (list.kinds) |kind| {
+            var lines = std.mem.splitScalar(u8, list.registry, '\n');
+            while (lines.next()) |line| {
+                var tokens = std.mem.tokenizeAny(u8, line, " \t\r");
+                if (!std.mem.eql(u8, tokens.next() orelse continue, "extern")) continue;
+                if (!std.mem.eql(u8, tokens.next() orelse continue, "const")) continue;
+                if (!std.mem.eql(u8, tokens.next() orelse continue, list.struct_name)) continue;
+                const decl = tokens.next() orelse continue;
+                if (!std.mem.startsWith(u8, decl, "ff_") or !std.mem.endsWith(u8, decl, ";")) continue;
+                const symbol = decl["ff_".len .. decl.len - 1];
+
+                const name = if (kind.symbol) |suffix| name: {
+                    if (!std.mem.endsWith(u8, symbol, suffix)) continue;
+                    const base = symbol[0 .. symbol.len - suffix.len];
+                    if (!std.mem.endsWith(u8, base, "_")) continue;
+                    break :name base[0 .. base.len - 1];
+                } else name: {
+                    // Strip the filter type prefix, e.g. "vf_" in "vf_scale".
+                    const underscore = std.mem.indexOfScalar(u8, symbol, '_') orelse continue;
+                    break :name symbol[underscore + 1 ..];
+                };
+
+                const config_name = std.ascii.allocUpperString(
+                    b.allocator,
+                    b.fmt("CONFIG_{s}_{s}", .{ name, kind.config }),
+                ) catch @panic("OOM");
+                if (!(enabled.get(config_name) orelse false)) continue;
+                out.print(b.allocator, "    &ff_{s},\n", .{symbol}) catch @panic("OOM");
+            }
+        }
+        for (list.trailer) |symbol| out.print(b.allocator, "    &ff_{s},\n", .{symbol}) catch @panic("OOM");
+        out.appendSlice(b.allocator, "    NULL };\n") catch @panic("OOM");
+        _ = wf.add(list.path, out.items);
+    }
 }
 
 const component_subdirs = [_][]const u8{
